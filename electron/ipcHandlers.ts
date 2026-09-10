@@ -20,6 +20,11 @@ import { formatEnvelopeForPrompt } from './services/browser-context/formatEnvelo
 import { BrowserMetadataClassifierService } from './services/browser-context/BrowserMetadataClassifierService';
 import type { BrowserContextCategory, SafeWebsiteMetadata } from './services/browser-context/types';
 import { SettingsManager } from './services/SettingsManager';
+import {
+  PersistentContextService,
+  persistentContextBudgetChars,
+  renderPersistentContext,
+} from './services/PersistentContextService';
 import { ProviderStatusRegistry } from './services/ProviderStatusRegistry';
 import { SkillsManager } from './services/SkillsManager';
 import { SAFE_DOCUMENT_EXTENSIONS } from './services/SafeDocumentTextExtractor';
@@ -94,6 +99,7 @@ function repairFirstUsefulMs(llmHelper: any, minMs: number = 7000, turnKey?: obj
 import { stripPriorAssistantTurns } from './llm/conversationHistoryPolicy';
 import { performanceHooks, applyAdaptiveTtft, secondaryStreamObserver } from './llm/performance/wiring';
 import { estimateTokens as _estimatePerfTokens } from './llm/modelCapabilities';
+import { getModelCapabilities } from './llm/modelCapabilities';
 import { mintTurnId } from './llm/turnIdentity';
 import type { StreamRouteOptions } from './llm/streamContextPolicy';
 import { buildProfileJitPrompt } from './llm/ProfileJitPromptBuilder';
@@ -7036,13 +7042,41 @@ export function initializeIpcHandlers(appState: AppState): void {
       console.warn('[direct-assist] live session transcript unavailable, proceeding without it:', (error as Error)?.message);
     }
 
+    let persistentContextBlock = '';
+    try {
+      const persistentService = PersistentContextService.getInstance();
+      const persistentSnapshot = await persistentService.capture();
+      if (persistentSnapshot.enabled && persistentSnapshot.sources.length > 0) {
+        const capabilities = getModelCapabilities(selection.model, selection.provider === 'ollama');
+        const budget = persistentContextBudgetChars(
+          capabilities,
+          resolvedSkill.currentRequest || request.currentRequest,
+          '',
+        );
+        const rendered = renderPersistentContext(persistentSnapshot, budget);
+        persistentContextBlock = rendered.text;
+        if (rendered.shortenedSourceIds.length > 0) {
+          persistentService.publishWarnings([{
+            code: 'context_shortened',
+            message: `Persistent context was shortened to fit ${capabilities.name || 'the selected model'}.`,
+            sourceIds: [...rendered.shortenedSourceIds],
+          }]);
+        }
+      }
+    } catch (error) {
+      console.warn('[direct-assist] persistent context unavailable, proceeding without it:', (error as Error)?.message);
+    }
+
     const directRequest: DirectAssistRequestInput = Object.freeze({
       requestId: request.requestId,
       source: request.source,
       selection,
       currentRequest: resolvedSkill.currentRequest,
       skill: resolvedSkill.skill ?? null,
-      manualContext: request.manualContext,
+      // Renderer manualContext is a legacy field and is not populated by the
+      // current UI. Keep it as a fallback, but never concatenate unscoped text
+      // after the already-rendered persistent-context envelope.
+      manualContext: persistentContextBlock || request.manualContext,
       referenceFiles,
       pageContext: request.pageContext,
       history: request.history,
@@ -7213,6 +7247,103 @@ export function initializeIpcHandlers(appState: AppState): void {
       return { success: true, cancelled: true };
     },
   );
+
+  const broadcastPersistentContextChanged = async (): Promise<void> => {
+    const state = await PersistentContextService.getInstance().getViewState();
+    BrowserWindow.getAllWindows().forEach((win) => {
+      if (!win.isDestroyed()) win.webContents.send('persistent-context-changed', state);
+    });
+  };
+
+  safeHandle('persistent-context:get', async () => {
+    return PersistentContextService.getInstance().getViewState();
+  });
+
+  safeHandle('persistent-context:set-enabled', async (_, enabled: unknown) => {
+    if (typeof enabled !== 'boolean') return { success: false, error: 'invalid_type' };
+    if (!PersistentContextService.getInstance().setEnabled(enabled)) {
+      return { success: false, error: 'settings_store_degraded' };
+    }
+    await broadcastPersistentContextChanged();
+    return { success: true };
+  });
+
+  safeHandle('persistent-context:set-pasted', async (_, payload: unknown) => {
+    if (!payload || typeof payload !== 'object') return { success: false, error: 'invalid_payload' };
+    const candidate = payload as { text?: unknown; enabled?: unknown };
+    if (typeof candidate.text !== 'string'
+      || (candidate.enabled !== undefined && typeof candidate.enabled !== 'boolean')) {
+      return { success: false, error: 'invalid_payload' };
+    }
+    if (!PersistentContextService.getInstance().setPastedText(candidate.text, candidate.enabled as boolean | undefined)) {
+      return {
+        success: false,
+        error: candidate.text.length > 32_000 ? 'pasted_context_too_large' : 'settings_store_degraded',
+      };
+    }
+    await broadcastPersistentContextChanged();
+    return { success: true };
+  });
+
+  safeHandle('persistent-context:select-files', async (event) => {
+    const parent = BrowserWindow.fromWebContents(event.sender);
+    const options = {
+      properties: ['openFile', 'multiSelections'] as Array<'openFile' | 'multiSelections'>,
+      filters: [{ name: 'Text files', extensions: ['txt'] }],
+    };
+    const result = parent
+      ? await dialog.showOpenDialog(parent, options)
+      : await dialog.showOpenDialog(options);
+    if (result.canceled || result.filePaths.length === 0) return { success: true, canceled: true };
+    const saved = await PersistentContextService.getInstance().addSelectedFiles(result.filePaths);
+    if (saved.success) await broadcastPersistentContextChanged();
+    return { ...saved, canceled: false };
+  });
+
+  safeHandle('persistent-context:relink-file', async (event, id: unknown) => {
+    if (typeof id !== 'string') return { success: false, error: 'invalid_id' };
+    const parent = BrowserWindow.fromWebContents(event.sender);
+    const options = {
+      properties: ['openFile'] as Array<'openFile'>,
+      filters: [{ name: 'Text files', extensions: ['txt'] }],
+    };
+    const result = parent
+      ? await dialog.showOpenDialog(parent, options)
+      : await dialog.showOpenDialog(options);
+    if (result.canceled || !result.filePaths[0]) return { success: true, canceled: true };
+    const saved = await PersistentContextService.getInstance().relinkFile(id, result.filePaths[0]);
+    if (saved.success) await broadcastPersistentContextChanged();
+    return { ...saved, canceled: false };
+  });
+
+  safeHandle('persistent-context:set-file-enabled', async (_, id: unknown, enabled: unknown) => {
+    if (typeof id !== 'string' || typeof enabled !== 'boolean') return { success: false, error: 'invalid_payload' };
+    if (!PersistentContextService.getInstance().updateFileEnabled(id, enabled)) {
+      return { success: false, error: 'not_found_or_store_degraded' };
+    }
+    await broadcastPersistentContextChanged();
+    return { success: true };
+  });
+
+  safeHandle('persistent-context:reorder-files', async (_, ids: unknown) => {
+    if (!Array.isArray(ids) || ids.some((id) => typeof id !== 'string')) {
+      return { success: false, error: 'invalid_order' };
+    }
+    if (!PersistentContextService.getInstance().reorderFiles(ids as string[])) {
+      return { success: false, error: 'invalid_order_or_store_degraded' };
+    }
+    await broadcastPersistentContextChanged();
+    return { success: true };
+  });
+
+  safeHandle('persistent-context:remove-file', async (_, id: unknown) => {
+    if (typeof id !== 'string') return { success: false, error: 'invalid_id' };
+    if (!PersistentContextService.getInstance().removeFile(id)) {
+      return { success: false, error: 'not_found_or_store_degraded' };
+    }
+    await broadcastPersistentContextChanged();
+    return { success: true };
+  });
 
   safeHandle('get-code-verification', async () => {
     // Default OFF: code verification is currently disabled. Only true when the

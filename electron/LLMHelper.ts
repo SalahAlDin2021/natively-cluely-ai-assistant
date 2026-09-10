@@ -80,6 +80,13 @@ import type {
   DirectAssistRung,
   DirectAssistSelection,
 } from './direct-assist/types';
+import {
+  PersistentContextService,
+  PERSISTENT_CONTEXT_MARKER,
+  persistentContextBudgetChars,
+  prependPersistentContext,
+  renderPersistentContext,
+} from './services/PersistentContextService';
 const execAsync = promisify(exec);
 const NATIVELY_API_URL = (process.env.NATIVELY_API_URL || 'https://api.natively.software').replace(/\/+$/, '');
 
@@ -793,6 +800,7 @@ export class LLMHelper {
     if (/<reference_file|<active_mode_retrieved_context|mode_retrieval/i.test(context)) scopes.push('reference_files');
     if (/<meeting_history|USER-PROVIDED PERSONA CONTEXT|<user_context|<candidate_|<active_mode_custom_instructions/i.test(context)) scopes.push('profile_history');
     if (/<post_call_summary|meeting summary|silent meeting summarizer|silent meeting note-taker/i.test(context)) scopes.push('post_call_summary');
+    if (context.includes(PERSISTENT_CONTEXT_MARKER)) scopes.push('persistent_context');
     // Context Intelligence V3 evidence markup. The patterns above are the
     // LEGACY tag vocabulary; V3 has been the default answer path since
     // 2026-07-30 and packs every source as `<evidence source_type="…">`, which
@@ -808,6 +816,7 @@ export class LLMHelper {
     if (/<reference_file|<active_mode_retrieved_context|mode_retrieval/i.test(message)) scopes.push('reference_files');
     if (/<meeting_history|USER-PROVIDED PERSONA CONTEXT|<user_context|<candidate_|<active_mode_custom_instructions/i.test(message)) scopes.push('profile_history');
     if (/<post_call_summary/i.test(message)) scopes.push('post_call_summary');
+    if (message.includes(PERSISTENT_CONTEXT_MARKER)) scopes.push('persistent_context');
     // V3 evidence markup — see inferContextScopes. A V3 prompt carries its
     // evidence in the MESSAGE (context is undefined), so this is the branch
     // that actually fires on the default path.
@@ -840,6 +849,13 @@ export class LLMHelper {
     }
     if (deniedScopes.includes('post_call_summary')) {
       scrubbed = scrubbed.replace(/<post_call_summary\b[\s\S]*?<\/post_call_summary>\s*/gi, '');
+    }
+    if (deniedScopes.includes('persistent_context') && scrubbed.includes(PERSISTENT_CONTEXT_MARKER)) {
+      scrubbed = scrubbed.replace(/<persistent_user_context\b[\s\S]*?<\/persistent_user_context>\s*/gi, '');
+      PersistentContextService.getInstance().publishWarnings([{
+        code: 'privacy_blocked',
+        message: 'Persistent context was omitted because this cloud provider is not allowed to receive it.',
+      }]);
     }
     // TRANSCRIPT had NO branch at all. Enforcement for it was `context =
     // undefined` and nothing else, so a payload carrying the transcript inside
@@ -1151,6 +1167,71 @@ export class LLMHelper {
       return;
     }
     console.warn(`[ScopeFallback] ${scope} denied; Ollama unavailable, omitting from context`);
+  }
+
+  /**
+   * Resolve live-linked global context once at the outer request boundary and
+   * prepend it to the current user task. The XML marker makes this idempotent:
+   * nested helpers and repair/fallback paths may all pass through this method,
+   * but provider payloads still receive exactly one copy.
+   */
+  private async withPersistentContext(
+    message: string,
+    systemPrompt: string = '',
+    modelId: string = this.getCurrentModelId(),
+    isOllamaModel: boolean = this.useOllama,
+    targetIsLocal?: boolean,
+  ): Promise<string> {
+    if (!message || message.includes(PERSISTENT_CONTEXT_MARKER)) return message;
+    try {
+      const service = PersistentContextService.getInstance();
+      const persistentScopeDenied = this.getProviderScopePolicy()?.persistent_context === false;
+      const currentProviderIsLocal = targetIsLocal ?? (
+        isOllamaModel
+        || customProviderIsLocal(this.customProvider)
+        || customProviderIsLocal(this.activeCurlProvider)
+      );
+      if (persistentScopeDenied && !currentProviderIsLocal) {
+        service.publishWarnings([{
+          code: 'privacy_blocked',
+          message: 'Persistent context was omitted because this cloud provider is not allowed to receive it.',
+        }]);
+        return message;
+      }
+      const snapshot = await service.capture();
+      if (!snapshot.enabled || snapshot.sources.length === 0) return message;
+      const capabilities = getModelCapabilities(modelId, isOllamaModel);
+      const budget = persistentContextBudgetChars(capabilities, message, systemPrompt);
+      const rendered = renderPersistentContext(snapshot, budget);
+      if (rendered.shortenedSourceIds.length > 0) {
+        service.publishWarnings([{
+          code: 'context_shortened',
+          message: `Persistent context was shortened to fit ${capabilities.name || 'the selected model'}.`,
+          sourceIds: [...rendered.shortenedSourceIds],
+        }]);
+      }
+      return prependPersistentContext(message, rendered.text);
+    } catch (error: any) {
+      console.warn('[persistent-context] context injection failed; continuing without it:', error?.message || error);
+      return message;
+    }
+  }
+
+  private async withPersistentContextContents(
+    contents: any[],
+    modelId: string,
+  ): Promise<any[]> {
+    const serializedText = contents
+      .flatMap((entry: any) => entry?.parts ?? entry)
+      .map((part: any) => typeof part?.text === 'string' ? part.text : '')
+      .filter(Boolean)
+      .join('\n');
+    const contextual = await this.withPersistentContext(serializedText || 'Process the supplied input.', '', modelId, false, false);
+    if (contextual === serializedText || contextual === 'Process the supplied input.') return contents;
+    const markerEnd = contextual.indexOf('</persistent_user_context>');
+    if (markerEnd < 0) return contents;
+    const block = contextual.slice(0, markerEnd + '</persistent_user_context>'.length);
+    return [{ role: 'user', parts: [{ text: block }] }, ...contents];
   }
 
   constructor(apiKey?: string, useOllama: boolean = false, ollamaModel?: string, ollamaUrl?: string, groqApiKey?: string, openaiApiKey?: string, claudeApiKey?: string, deepseekApiKey?: string, nvidiaNimApiKey?: string) {
@@ -1533,6 +1614,17 @@ export class LLMHelper {
     // and each method's private default silently became the real bound.
     opts?: { signal?: AbortSignal; timeoutMs?: number },
   ): Promise<string> {
+    const visionModel = providerId === 'gemini_flash_lite' ? GEMINI_FLASH_LITE_MODEL
+      : providerId === 'gemini_flash' ? GEMINI_FLASH_MODEL
+        : providerId === 'gemini_pro' ? GEMINI_PRO_MODEL
+          : this.getCurrentModelId();
+    userPrompt = await this.withPersistentContext(
+      userPrompt,
+      systemPrompt,
+      visionModel,
+      false,
+      providerId === 'custom' && customProviderIsLocal(this.customProvider),
+    );
     switch (providerId) {
       case 'natively':
         // A screen-understanding extraction is the DENSE, non-streaming case
@@ -2622,9 +2714,10 @@ export class LLMHelper {
 
     await this.rateLimiters.gemini.acquire();
     // console.log(`[LLMHelper] Calling ${GEMINI_FLASH_MODEL}...`)
+    const contextualContents = await this.withPersistentContextContents(contents, GEMINI_FLASH_MODEL);
     const request = {
       model: GEMINI_FLASH_MODEL,
-      contents: contents,
+      contents: contextualContents,
       config: {
         maxOutputTokens: MAX_OUTPUT_TOKENS,
         temperature: 0.3,      // Lower = faster, more focused
@@ -3104,13 +3197,14 @@ RULES:
 - If unsure, answer briefly and confidently anyway.
 - Never hedge. Never say "it depends".`;
 
-    const promptMessage = `LATEST QUESTION:
+    let promptMessage = `LATEST QUESTION:
 ${lastQuestion}
 
 ANSWER DIRECTLY:`;
 
     // Apply language instruction so this path honours the user's language setting
     const systemPrompt = this.injectLanguageInstruction(basePrompt);
+    promptMessage = await this.withPersistentContext(promptMessage, systemPrompt);
 
     try {
       if (this.isCodexAvailable()) {
@@ -3438,6 +3532,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
 
   public async chatWithGemini(message: string, imagePaths?: string[], context?: string, skipSystemPrompt: boolean = false, alternateGroqMessage?: string, routeOptions?: StreamRouteOptions, skipModeInjection?: boolean): Promise<string> {
     try {
+      message = await this.withPersistentContext(message);
       console.log(`[LLMHelper] chatWithGemini called`, { messageLength: message.length, imageCount: imagePaths?.length ?? 0, hasContext: Boolean(context) })
 
       // ============================================================
@@ -4141,6 +4236,7 @@ let isMultimodal = !!(imagePaths?.length);
    * is down (the controller's deadline bounds the total wait either way).
    */
   public async generateJudgeVerdict(message: string): Promise<string> {
+    message = await this.withPersistentContext(message, 'Return the exact structured format requested.', GEMINI_FLASH_LITE_MODEL, false, false);
     if (this.client) {
       for (const modelId of [GEMINI_FLASH_LITE_MODEL, GEMINI_FLASH_MODEL]) {
         try {
@@ -4178,6 +4274,7 @@ let isMultimodal = !!(imagePaths?.length);
     // loop below gives the 3-cycle retry-then-fail behavior.
     opts?: { preferFast?: boolean },
   ): Promise<string> {
+    message = await this.withPersistentContext(message, 'Return the exact structured format requested.');
     type ProviderAttempt = { name: string; execute: () => Promise<string> };
     const providers: ProviderAttempt[] = [];
     const permanentFailureKeyFor = (name: string): string => {
@@ -4823,6 +4920,7 @@ let isMultimodal = !!(imagePaths?.length);
 
   // The handler for cURL requests
   public async chatWithCurl(userMessage: string, systemPrompt?: string, imagePath?: string): Promise<string> {
+    userMessage = await this.withPersistentContext(userMessage, systemPrompt || '');
     if (!this.activeCurlProvider) throw new Error("No cURL provider active");
     this.assertOutboundScopes('custom_curl', userMessage, imagePath ? [imagePath] : undefined);
 
@@ -5050,6 +5148,8 @@ let isMultimodal = !!(imagePaths?.length);
     imagePath?: string,
     responsePath?: string,
   ): Promise<string> {
+    combinedMessage = await this.withPersistentContext(combinedMessage, systemPrompt);
+    rawUserMessage = await this.withPersistentContext(rawUserMessage, systemPrompt);
     this.assertOutboundScopes('custom_provider', combinedMessage, imagePath ? [imagePath] : undefined);
 
     // 1. Parse cURL to JSON object
@@ -5408,6 +5508,7 @@ let isMultimodal = !!(imagePaths?.length);
    * After all cloud tiers: Custom Provider -> cURL Provider -> Ollama
    */
   private async generateWithVisionFallback(systemPrompt: string, userPrompt: string, imagePaths: string[] = []): Promise<string> {
+    userPrompt = await this.withPersistentContext(userPrompt, systemPrompt);
     type ProviderAttempt = { name: string; execute: () => Promise<string> };
 
     // ── Screen-understanding mode ───────────────────────────────────────────
@@ -5815,6 +5916,7 @@ let isMultimodal = !!(imagePaths?.length);
   // buffered result must pass an object and read `outcome.incomplete` after
   // the stream ends; the cap and post-commit-failure branches below set it.
   public async * streamChatWithGemini(message: string, imagePaths?: string[], context?: string, skipSystemPrompt: boolean = false, abortSignal?: AbortSignal, outcome?: { incomplete?: boolean; reason?: 'output_cap' | 'provider_died_post_commit' }): AsyncGenerator<string, void, unknown> {
+    message = await this.withPersistentContext(message);
     console.log(`[LLMHelper] streamChatWithGemini called`, { messageLength: message.length, imageCount: imagePaths?.length ?? 0, hasContext: Boolean(context) });
 
     let isMultimodal = !!(imagePaths?.length);
@@ -6413,6 +6515,11 @@ let isMultimodal = !!(imagePaths?.length);
     profile: 'long_form' | undefined,
     ...args: Parameters<LLMHelper['_streamChatInner']>
   ): AsyncGenerator<string, void, unknown> {
+    const contextualArgs = [...args] as Parameters<LLMHelper['_streamChatInner']>;
+    contextualArgs[0] = await this.withPersistentContext(
+      contextualArgs[0],
+      contextualArgs[3] || '',
+    );
     const { StreamingDashReducer } = await import('./llm/postProcessor');
     const { StreamingReasoningFilter } = await import('./llm/reasoningTagFilter');
     // Per-stream reasoning-tag filter. Runs BEFORE the dash reducer so a think
@@ -6435,7 +6542,7 @@ let isMultimodal = !!(imagePaths?.length);
     // requires Node ≥17 (Electron's runtime is well past that).
     // Find the AbortSignal anywhere in args (position-independent) so adding a
     // trailing `thinkingBudget` arg below doesn't hide it from the abort check.
-    const abortSignal = args.find((a): a is AbortSignal => a instanceof AbortSignal);
+    const abortSignal = contextualArgs.find((a): a is AbortSignal => a instanceof AbortSignal);
     // Runaway bound. Applied HERE, at the single public entry point, so it
     // covers every provider — the wrapped fall-through sites and the ones that
     // return unconditionally (Ollama, OpenAI, Claude, DeepSeek, LiteLLM) alike.
@@ -6460,7 +6567,7 @@ let isMultimodal = !!(imagePaths?.length);
     const outputCeiling = testOutputCharCeiling()
       ?? (profile === 'long_form' ? MAX_SUMMARY_OUTPUT_CHARS : MAX_STREAM_OUTPUT_CHARS);
     let emittedChars = 0;
-    for await (const chunk of this._streamChatInner(...args)) {
+    for await (const chunk of this._streamChatInner(...contextualArgs)) {
       if (abortSignal?.aborted) return;
       // Strip the internal truncation marker before anything downstream sees
       // it. This is the ONLY place it is consumed; see TRUNCATION_SENTINEL.
@@ -11330,6 +11437,8 @@ let isMultimodal = !!(imagePaths?.length);
     geminiMessage: string,
     config?: { temperature?: number; maxTokens?: number }
   ): AsyncGenerator<string, void, unknown> {
+    groqMessage = await this.withPersistentContext(groqMessage);
+    geminiMessage = await this.withPersistentContext(geminiMessage);
     // Bounded like every other PUBLIC streaming entry point (code review
     // 2026-08-12). The Groq branch already sets max_tokens, but the Gemini
     // fallback delegates to streamWithGeminiModel with no output bound at all.
@@ -11554,6 +11663,7 @@ let isMultimodal = !!(imagePaths?.length);
       console.log('[LLMHelper] Empty context — skipping summary generation.');
       return '';
     }
+    context = await this.withPersistentContext(context, systemPrompt);
     const summaryDeniedScopes = getDeniedDataScopes(['post_call_summary'], this.getProviderScopePolicy());
     if (summaryDeniedScopes.includes('post_call_summary')) {
       const ollamaAvailable = this.useOllama && await this.ensureOllamaModelSelected();

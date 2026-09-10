@@ -1,6 +1,7 @@
 import { app } from 'electron';
 import fs from 'fs';
 import path from 'path';
+import type { PersistentContextSettings } from './PersistentContextService';
 
 export interface AppSettings {
     // Only boot-critical or non-encrypted settings should live here.
@@ -47,6 +48,9 @@ export interface AppSettings {
      * announced in the UI, so it can never route silently.
      */
     directAssistFallbackEnabled?: boolean;
+    /** Free, global user context. File contents are never copied here: only
+     * live-linked paths plus the explicitly pasted text are persisted. */
+    persistentContext?: PersistentContextSettings;
     actionButtonMode?: 'recap' | 'brainstorm';
     groqFastTextMode?: boolean;
     codexCliEnabled?: boolean;
@@ -212,6 +216,7 @@ export interface AppSettings {
         profile_history?: boolean;
         embeddings?: boolean;
         post_call_summary?: boolean;
+        persistent_context?: boolean;
         // Verified code execution: when false, the model's code is NOT sent to
         // the cloud (Piston) runner for languages we can't run locally. Default
         // allowed; only the cloud path consults this (local py/js never sends).

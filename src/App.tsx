@@ -333,6 +333,7 @@ const App: React.FC = () => {
 
   // Re-index State
   const [incompatibleWarning, setIncompatibleWarning] = useState<{count: number; oldProvider: string; newProvider: string} | null>(null);
+  const [persistentContextWarning, setPersistentContextWarning] = useState<string | null>(null);
   // Automatic background re-index progress (fired after an embedding-model upgrade).
   const [reindexProgress, setReindexProgress] = useState<{done: number; total: number} | null>(null);
   
@@ -783,6 +784,15 @@ const App: React.FC = () => {
       });
     }
 
+    let persistentContextWarningTimer: ReturnType<typeof setTimeout> | undefined;
+    const removePersistentContextWarning = window.electronAPI?.onPersistentContextWarning?.((warnings) => {
+      const message = warnings.map((warning) => warning.message).filter(Boolean).slice(0, 2).join(' ');
+      if (!message) return;
+      setPersistentContextWarning(message);
+      if (persistentContextWarningTimer) clearTimeout(persistentContextWarningTimer);
+      persistentContextWarningTimer = setTimeout(() => setPersistentContextWarning(null), 9000);
+    });
+
     let removeReindexProgress: (() => void) | undefined;
     if (window.electronAPI?.onReindexProgress) {
       removeReindexProgress = window.electronAPI.onReindexProgress((phase, data) => {
@@ -816,6 +826,8 @@ const App: React.FC = () => {
       if (removeOllamaError) removeOllamaError();
       if (removeWarning) removeWarning();
       if (removeEmbeddingDegraded) removeEmbeddingDegraded();
+      if (removePersistentContextWarning) removePersistentContextWarning();
+      if (persistentContextWarningTimer) clearTimeout(persistentContextWarningTimer);
       // Without this the pending reset can fire after unmount/remount and
       // clobber the banner state of the next mount.
       if (bannerResetTimer) clearTimeout(bannerResetTimer);
@@ -1206,6 +1218,26 @@ const App: React.FC = () => {
         )}
       </AnimatePresence>
 
+
+      <AnimatePresence>
+        {persistentContextWarning && (
+          <motion.div
+            initial={{ opacity: 0, y: 24, scale: 0.97 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 16, scale: 0.97 }}
+            className="fixed bottom-6 left-6 z-[70] pointer-events-auto"
+          >
+            <div className="bg-[#1A1A1A] border border-amber-400/30 shadow-2xl rounded-xl px-4 py-3 max-w-[360px] flex items-start gap-3">
+              <AlertCircle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+              <div className="min-w-0">
+                <div className="text-sm font-medium text-[#E0E0E0]">Context warning</div>
+                <p className="text-xs text-[#A0A0A0] mt-0.5 leading-relaxed">{persistentContextWarning}</p>
+              </div>
+              <button onClick={() => setPersistentContextWarning(null)} className="text-[#A0A0A0] hover:text-white text-xs">Dismiss</button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       <AnimatePresence>
         {incompatibleWarning && isDefault && (

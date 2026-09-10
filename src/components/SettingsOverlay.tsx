@@ -7,7 +7,7 @@ import {
     Camera, RotateCcw, Eye, Layout, MessageSquare, Crop,
     ChevronDown, ChevronUp, Check, BadgeCheck, Power, Palette, Calendar, Ghost, Sun, Moon, RefreshCw, Info, Globe, FlaskConical, Terminal, Download, Settings, Activity, ExternalLink, Trash2,
     Sparkles, Pencil, Briefcase, Building2, Search, MapPin, CheckCircle, HelpCircle, Zap, SlidersHorizontal, PointerOff, Folder,
-    Star, AlertCircle, Gift, Smartphone, Cpu, Shield, Code2, Headphones, Boxes, ListOrdered
+    Star, AlertCircle, Gift, Smartphone, Cpu, Shield, Code2, Headphones, Boxes, ListOrdered, FileText
 } from 'lucide-react';
 import { AutoAnswerIcon } from './AutoAnswerIcon';
 import { HiCreditCard } from 'react-icons/hi2';
@@ -21,6 +21,7 @@ import { EmbeddingSettings } from './settings/EmbeddingSettings';
 import { RerankerSettings } from './settings/RerankerSettings';
 import { IntelligenceSettings } from './settings/IntelligenceSettings';
 import { SkillsSettings } from './settings/SkillsSettings';
+import { ContextSettings } from './settings/ContextSettings';
 import { LocalWhisperModelPanel, type ChannelConfig as LocalWhisperChannelConfig } from './LocalWhisperModelPanel';
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
 import { useShortcuts } from '../hooks/useShortcuts';
@@ -411,6 +412,7 @@ const SETTINGS_NAV_ORDER = [
     'general',
     'plans',
     'ai-providers',
+    'context',
     'embedding',
     'reranker',
     'skills',
@@ -1888,6 +1890,13 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                         <FlaskConical size={16} /> {t('AI Providers')}
                                     </button>
                                     <button
+                                        onClick={() => setActiveTab('context')}
+                                        className={navItemClass(activeTab === 'context')}
+                                    >
+                                        {activeTab === 'context' && navActivePill}
+                                        <FileText size={16} /> {t('Context')}
+                                    </button>
+                                    <button
                                         onClick={() => setActiveTab('embedding')}
                                         className={navItemClass(activeTab === 'embedding')}
                                     >
@@ -2740,6 +2749,9 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                     }}
                                     aiLangDropdownRef={aiLangDropdownRef}
                                 />
+                            )}
+                            {activeTab === 'context' && (
+                                <ContextSettings />
                             )}
                             {activeTab === 'skills' && (
                                 <SkillsSettings />

@@ -23,6 +23,7 @@ export const UI_PROVIDER_DATA_SCOPES = [
     'profile_history',
     'embeddings',
     'post_call_summary',
+    'persistent_context',
 ] as const;
 
 export const NON_UI_PROVIDER_DATA_SCOPES = [

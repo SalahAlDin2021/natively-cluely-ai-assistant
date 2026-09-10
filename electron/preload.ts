@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron';
 import type { SkillUploadPayload } from './services/skills/SkillValidator';
 import type { NativelyUsageResponse, NativelyPlansResponse } from '../src/types/nativelyUsage';
 import { PAGE_CAPTURE_FALLBACK_CHANNEL, PAGE_CAPTURE_STARTED_CHANNEL, type PageCaptureFallbackNotice } from './services/pageCaptureFallback';
+import type { PersistentContextViewState, PersistentContextWarning } from './services/PersistentContextService';
 
 /**
  * Metadata the companion extension sends with a captured page (drives the
@@ -1013,6 +1014,16 @@ interface ElectronAPI {
   getDirectAssistEnabled: () => Promise<boolean>;
   setDirectAssistEnabled: (enabled: boolean) => Promise<{ success: boolean; error?: string }>;
   onDirectAssistEnabledChanged: (callback: (enabled: boolean) => void) => () => void;
+  getPersistentContext: () => Promise<PersistentContextViewState>;
+  setPersistentContextEnabled: (enabled: boolean) => Promise<{ success: boolean; error?: string }>;
+  setPersistentContextPasted: (payload: { text: string; enabled?: boolean }) => Promise<{ success: boolean; error?: string }>;
+  selectPersistentContextFiles: () => Promise<{ success: boolean; canceled?: boolean; error?: string }>;
+  relinkPersistentContextFile: (id: string) => Promise<{ success: boolean; canceled?: boolean; error?: string }>;
+  setPersistentContextFileEnabled: (id: string, enabled: boolean) => Promise<{ success: boolean; error?: string }>;
+  reorderPersistentContextFiles: (ids: string[]) => Promise<{ success: boolean; error?: string }>;
+  removePersistentContextFile: (id: string) => Promise<{ success: boolean; error?: string }>;
+  onPersistentContextChanged: (callback: (state: PersistentContextViewState) => void) => () => void;
+  onPersistentContextWarning: (callback: (warnings: PersistentContextWarning[]) => void) => () => void;
   getCodeVerification: () => Promise<boolean>;
   setCodeVerification: (enabled: boolean) => Promise<{ success: boolean }>;
   getMeetingRetention: () => Promise<'forever' | '7d' | '30d' | 'never'>;
@@ -1029,6 +1040,7 @@ interface ElectronAPI {
     profile_history?: boolean;
     embeddings?: boolean;
     post_call_summary?: boolean;
+    persistent_context?: boolean;
   }>;
   setProviderDataScopes: (scopes: {
     transcript?: boolean;
@@ -1037,6 +1049,7 @@ interface ElectronAPI {
     profile_history?: boolean;
     embeddings?: boolean;
     post_call_summary?: boolean;
+    persistent_context?: boolean;
   }) => Promise<{ success: boolean; error?: string }>;
   onProviderDataScopesChanged: (
     callback: (scopes: {
@@ -1046,6 +1059,7 @@ interface ElectronAPI {
       profile_history?: boolean;
       embeddings?: boolean;
       post_call_summary?: boolean;
+      persistent_context?: boolean;
     }) => void,
   ) => () => void;
   getScreenUnderstandingMode: () => Promise<'vision_first' | 'vision_only' | 'private_vision'>;
@@ -2821,6 +2835,26 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return () => {
       ipcRenderer.removeListener('direct-assist-enabled-changed', subscription);
     };
+  },
+  getPersistentContext: () => ipcRenderer.invoke('persistent-context:get'),
+  setPersistentContextEnabled: (enabled: boolean) => ipcRenderer.invoke('persistent-context:set-enabled', enabled),
+  setPersistentContextPasted: (payload: { text: string; enabled?: boolean }) =>
+    ipcRenderer.invoke('persistent-context:set-pasted', payload),
+  selectPersistentContextFiles: () => ipcRenderer.invoke('persistent-context:select-files'),
+  relinkPersistentContextFile: (id: string) => ipcRenderer.invoke('persistent-context:relink-file', id),
+  setPersistentContextFileEnabled: (id: string, enabled: boolean) =>
+    ipcRenderer.invoke('persistent-context:set-file-enabled', id, enabled),
+  reorderPersistentContextFiles: (ids: string[]) => ipcRenderer.invoke('persistent-context:reorder-files', ids),
+  removePersistentContextFile: (id: string) => ipcRenderer.invoke('persistent-context:remove-file', id),
+  onPersistentContextChanged: (callback: (state: PersistentContextViewState) => void) => {
+    const subscription = (_: Electron.IpcRendererEvent, state: PersistentContextViewState) => callback(state);
+    ipcRenderer.on('persistent-context-changed', subscription);
+    return () => ipcRenderer.removeListener('persistent-context-changed', subscription);
+  },
+  onPersistentContextWarning: (callback: (warnings: PersistentContextWarning[]) => void) => {
+    const subscription = (_: Electron.IpcRendererEvent, warnings: PersistentContextWarning[]) => callback(warnings);
+    ipcRenderer.on('persistent-context-warning', subscription);
+    return () => ipcRenderer.removeListener('persistent-context-warning', subscription);
   },
   getDirectAssistFallbackEnabled: () => ipcRenderer.invoke('get-direct-assist-fallback-enabled'),
   setDirectAssistFallbackEnabled: (enabled: boolean) =>

@@ -34,6 +34,17 @@ export interface DynamicActionPayload {
 
 export type DirectAssistSource = 'typed' | 'stt' | 'screenshot'
 
+export type PersistentContextSourceState = 'ready' | 'disabled' | 'missing' | 'unreadable' | 'invalid_type' | 'invalid_encoding' | 'too_large' | 'empty'
+export interface PersistentContextFileSetting { id: string; filePath: string; displayName: string; enabled: boolean }
+export interface PersistentContextSettings { version: 1; enabled: boolean; pastedText: string; pastedTextEnabled: boolean; files: PersistentContextFileSetting[] }
+export interface PersistentContextFileStatus extends PersistentContextFileSetting { state: PersistentContextSourceState; sizeBytes?: number; modifiedAt?: number; message?: string }
+export interface PersistentContextViewState {
+  settings: PersistentContextSettings
+  files: PersistentContextFileStatus[]
+  limits: { maxFiles: number; maxFileBytes: number; maxTotalFileBytes: number; maxPastedChars: number }
+}
+export interface PersistentContextWarning { code: 'source_unavailable' | 'context_shortened' | 'privacy_blocked'; message: string; sourceIds?: string[] }
+
 export interface DirectAssistRequest {
   requestId: string
   source: DirectAssistSource
@@ -910,6 +921,16 @@ export interface ElectronAPI {
   getDirectAssistEnabled: () => Promise<boolean>;
   setDirectAssistEnabled: (enabled: boolean) => Promise<{ success: boolean; error?: string }>;
   onDirectAssistEnabledChanged: (callback: (enabled: boolean) => void) => () => void;
+  getPersistentContext: () => Promise<PersistentContextViewState>;
+  setPersistentContextEnabled: (enabled: boolean) => Promise<{ success: boolean; error?: string }>;
+  setPersistentContextPasted: (payload: { text: string; enabled?: boolean }) => Promise<{ success: boolean; error?: string }>;
+  selectPersistentContextFiles: () => Promise<{ success: boolean; canceled?: boolean; error?: string }>;
+  relinkPersistentContextFile: (id: string) => Promise<{ success: boolean; canceled?: boolean; error?: string }>;
+  setPersistentContextFileEnabled: (id: string, enabled: boolean) => Promise<{ success: boolean; error?: string }>;
+  reorderPersistentContextFiles: (ids: string[]) => Promise<{ success: boolean; error?: string }>;
+  removePersistentContextFile: (id: string) => Promise<{ success: boolean; error?: string }>;
+  onPersistentContextChanged: (callback: (state: PersistentContextViewState) => void) => () => void;
+  onPersistentContextWarning: (callback: (warnings: PersistentContextWarning[]) => void) => () => void;
   getDirectAssistFallbackEnabled: () => Promise<boolean>;
   setDirectAssistFallbackEnabled: (enabled: boolean) => Promise<{ success: boolean; error?: string }>;
   onDirectAssistFallbackEnabledChanged: (callback: (enabled: boolean) => void) => () => void;
@@ -919,9 +940,9 @@ export interface ElectronAPI {
   getMeetingRetention: () => Promise<'forever' | '7d' | '30d' | 'never'>;
   setMeetingRetention: (retention: 'forever' | '7d' | '30d' | 'never') => Promise<{ success: boolean; error?: string }>;
   onMeetingRetentionChanged: (callback: (retention: 'forever' | '7d' | '30d' | 'never') => void) => () => void;
-  getProviderDataScopes: () => Promise<{ transcript?: boolean; screenshots?: boolean; reference_files?: boolean; profile_history?: boolean; embeddings?: boolean; post_call_summary?: boolean }>;
-  setProviderDataScopes: (scopes: { transcript?: boolean; screenshots?: boolean; reference_files?: boolean; profile_history?: boolean; embeddings?: boolean; post_call_summary?: boolean }) => Promise<{ success: boolean; error?: string }>;
-  onProviderDataScopesChanged: (callback: (scopes: { transcript?: boolean; screenshots?: boolean; reference_files?: boolean; profile_history?: boolean; embeddings?: boolean; post_call_summary?: boolean }) => void) => () => void;
+  getProviderDataScopes: () => Promise<{ transcript?: boolean; screenshots?: boolean; reference_files?: boolean; profile_history?: boolean; embeddings?: boolean; post_call_summary?: boolean; persistent_context?: boolean }>;
+  setProviderDataScopes: (scopes: { transcript?: boolean; screenshots?: boolean; reference_files?: boolean; profile_history?: boolean; embeddings?: boolean; post_call_summary?: boolean; persistent_context?: boolean }) => Promise<{ success: boolean; error?: string }>;
+  onProviderDataScopesChanged: (callback: (scopes: { transcript?: boolean; screenshots?: boolean; reference_files?: boolean; profile_history?: boolean; embeddings?: boolean; post_call_summary?: boolean; persistent_context?: boolean }) => void) => () => void;
   getScreenUnderstandingMode: () => Promise<'vision_first' | 'vision_only' | 'private_vision'>;
   setScreenUnderstandingMode: (mode: 'vision_first' | 'vision_only' | 'private_vision') => Promise<{ success: boolean; error?: string }>;
   onScreenUnderstandingModeChanged: (callback: (mode: 'vision_first' | 'vision_only' | 'private_vision') => void) => () => void;

@@ -1739,7 +1739,7 @@ type PendingConfirm =
     | { kind: 'customProvider'; id: string };
 
 // The cloud data scopes, in render order. One list drives the rows, the count and
-// the "N/6 shared" summary, so those can never disagree. Keys must match
+// the "N/7 shared" summary, so those can never disagree. Keys must match
 // ProviderDataScope in electron/llm/ProviderRouter.ts — that union is what the
 // main-process guard asserts against.
 const SCOPE_ROWS = [
@@ -1749,6 +1749,7 @@ const SCOPE_ROWS = [
     { key: 'profile_history' as const,   labelKey: 'Profile history',     Icon: User },
     { key: 'embeddings' as const,        labelKey: 'Cloud embeddings',    Icon: Boxes },
     { key: 'post_call_summary' as const, labelKey: 'Post-call summaries', Icon: ClipboardList },
+    { key: 'persistent_context' as const, labelKey: 'Persistent context', Icon: FileText },
 ];
 
 // Provider groups for the settings tabs. Labels are translated at render time.
@@ -2451,7 +2452,7 @@ export const AIProvidersSettings: React.FC<AIProvidersSettingsProps> = ({
     const [technicalInterviewVisionFirst, setTechnicalInterviewVisionFirst] = useState<boolean>(true);
 
     // --- Cloud Provider Data Scopes (fail-closed cloud share controls) ---
-    const [providerDataScopes, setProviderDataScopes] = useState<{ transcript?: boolean; screenshots?: boolean; reference_files?: boolean; profile_history?: boolean; embeddings?: boolean; post_call_summary?: boolean }>({});
+    const [providerDataScopes, setProviderDataScopes] = useState<{ transcript?: boolean; screenshots?: boolean; reference_files?: boolean; profile_history?: boolean; embeddings?: boolean; post_call_summary?: boolean; persistent_context?: boolean }>({});
 
     // `screenUnderstandingMode` is one enum with three values, but it answers two
     // independent user questions. Presenting it as three radios forced the user to
